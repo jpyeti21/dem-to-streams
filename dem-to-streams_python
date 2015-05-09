@@ -1,0 +1,175 @@
+#!/usr/bin/python
+#-*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+# Name: prescott_script_template.py
+# Created By: Joshua Prescott
+# Copyright: © Who cares?
+# ArcGIS Version: 10.2
+# Python Version: 2.7
+# Created On: 2012-05-15
+# Updated On: 2014-02-01
+# ------------------------------------------------------------------------------
+'''
+General Script Description goes here.
+'''
+
+# Standard library imports.
+from email.mime.text import MIMEText
+import logging
+import os
+import platform
+import smtplib
+import time
+# Third-party imports.
+import arcpy
+
+# Local application imports.
+
+# Define common functions/global variables here.
+START_TIME = time.clock()
+LOG_FILE = ''.join([time.strftime('%Y-%m-%d', time.localtime()), '.log'])
+
+def get_elapsed_time(start_time):
+    '''
+    Given a starting time, return the end time as hours, minutes & seconds.
+    '''
+    elapsed_time = time.clock() - start_time
+    minutes, seconds = divmod(elapsed_time, 60)
+    hours, minutes = divmod(minutes, 60)
+    return (hours, minutes, seconds)
+    
+try:
+    # Setup logging.
+    logging.basicConfig(level=logging.INFO, # set to DEBUG when troubleshooting
+                    format='%(asctime)s %(levelname)-8s %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S',
+                    filename=LOG_FILE,
+                    filemode='w')
+    logging.info("Computer Name: " + platform.node())
+    logging.info("Operating System: " + platform.system())
+    logging.info("OS Release : " + platform.release())
+    logging.info("Python Version: " + platform.python_version())
+    
+# ------------------------ Body of script goes here ------------------------------    
+    #arcpy.AddMessage("message")
+    #variablename = arcpy.GetParameterAsText(0)    
+
+    #file path to initial DEM
+    sourcedem = arcpy.GetParameterAsText(0)
+    #sourcedem = r"C:\Users\DaddyCB\Documents\GIS\GIS_GENERAL_DATA\Elevation_Raster_Library\PSLC_2010_SuperMosaic_PugSound_6ft_Lidar_BareEarth\supermosaic_gdb\supermosaic.gdb\bare_earth"
+    #file path to initial bounding box (extent)
+    sourcebound = arcpy.GetParameterAsText(1)
+    #sourcebound = r"C:\Users\DaddyCB\Documents\GIS\PYTHON\PyRefresh\WatershedProj\Watershed_General.gdb\bounding_1_24_Project_diffproj"
+    #file path to folder to be used as workspace
+    wsfolder = arcpy.GetParameterAsText(2)
+    #wsfolder = r"C:\Users\DaddyCB\Documents\GIS\PYTHON\PyRefresh\WatershedrpojPyTest"
+    #name for new .gdb (will be created in wsfolder)
+    gdbname = arcpy.GetParameterAsText(3)
+    #gdbname = "watershedtest"
+    #set threshold number for Con tool
+    threshold = str(arcpy.GetParameterAsText(4))
+    #threshold = str(500)
+    #check for existence of gdb, if exists, delete, if not, create it
+    if arcpy.Exists(wsfolder + "\\" + gdbname + ".gdb"):
+        arcpy.AddMessage("gdb already existed. Deleting and recreating.")
+        arcpy.Delete_management(wsfolder + "\\" + gdbname + ".gdb")
+    else:
+        arcpy.AddMessage("")
+    arcpy.CreateFileGDB_management(wsfolder, gdbname, "CURRENT")
+    #set workspace to newly created gdb
+    workspace = wsfolder + "\\" + gdbname + ".gdb"
+    arcpy.env.workspace = workspace
+    
+    #check that bounding box spatial ref matches DEM, if not, reproject bounding box to DEM projection
+    spatial_ref_dem = arcpy.Describe(sourcedem).spatialReference    
+    spatial_ref_bound = arcpy.Describe(sourcebound).spatialReference
+    arcpy.AddMessage(spatial_ref_dem.projectionCode)
+    arcpy.AddMessage(spatial_ref_bound.projectionCode)
+    if spatial_ref_dem.projectionCode != spatial_ref_bound.projectionCode:
+        arcpy.Project_management(sourcebound,  workspace + "\\" + "reproj_bound", spatial_ref_dem, in_coor_system=spatial_ref_bound)
+    else: 
+        arcpy.FeatureClassToFeatureClass_conversion(sourcebound, workspace, "sourcebound")
+    #clip source dem to the source boundary
+    try:
+        arcpy.Clip_management(sourcedem, "", workspace + "\\" + "clipdem", 
+                             sourcebound, "", "ClippingGeometry", "")
+    except:
+        arcpy.GetMessages(2)
+    arcpy.AddMessage("finished clip")    
+    #run fill tool SA to fill sinks
+    clipdem = workspace + "\\" + "clipdem"
+    from arcpy.sa import *
+    arcpy.CheckOutExtension("Spatial")
+    outFill = Fill(clipdem)
+    outFill.save(workspace + "\\" + "fill")
+    arcpy.AddMessage("finished fill")
+    #run flow direction tool SA
+    fill = workspace + "\\" + "fill"
+    outFlowDirection = FlowDirection(fill)
+    outFlowDirection.save(workspace + "\\" + "flowdir")
+    arcpy.AddMessage("finished flowdir")
+    #run flow accumulation tool SA (takes time)
+    arcpy.AddMessage("the flow accumulation process may take some time...")
+    flowdir = workspace + "\\" + "flowdir"
+    outFlowAccumulation = FlowAccumulation(flowdir, "", "FLOAT")
+    outFlowAccumulation.save(workspace + "\\" + "flowaccum")
+    arcpy.AddMessage("finished flowaccum")
+    #run conditional evaluation (con)
+    flowaccum = workspace + "\\" + "flowaccum"
+    outCon = Con(flowaccum, "1", "", "Value>"+threshold)
+    outCon.save(workspace + "\\" + "net")
+    arcpy.AddMessage("finished Con, output: net")
+    #run stream link
+    net = workspace + "\\" + "net"
+    outStreamLink = StreamLink(net, flowdir)
+    outStreamLink.save(workspace + "\\" + "source")
+    arcpy.AddMessage("finished stream link")
+    #run watershed
+    source = workspace + "\\" + "source"
+    outWatershed = Watershed(flowdir, source, "Value")
+    outWatershed.save(workspace + "\\" + "watershed")
+    arcpy.AddMessage("finished watershed")
+    #run stream order
+    watershed = workspace + "\\" + "watershed"
+    outStreamOrder = StreamOrder(source, flowdir, "")
+    outStreamOrder.save(workspace + "\\" + "stream_order")
+    arcpy.AddMessage("finished stream order")
+    #run stream to feature
+    stream_order = workspace + "\\" + "stream_order"
+    StreamToFeature(stream_order, flowdir, workspace + "\\" + "streamtofeature")
+    arcpy.AddMessage("finished stream to feature")
+    #run watershed to feature
+    arcpy.RasterToPolygon_conversion(watershed, workspace + "\\" + "watershedtofeature")
+    arcpy.AddMessage("finished watershed to feature")
+    arcpy.AddMessage("cleaning up")
+    deletelist = ["fill", "flowaccum", "flowdir", "net", "source", "stream_order", "watershed"]
+    for deleteitem in deletelist:
+        arcpy.Delete_management(deleteitem)
+        arcpy.AddMessage("deleted " + deleteitem)
+    
+    arcpy.AddMessage("finished")
+# -------------------------- End script Body -------------------------------------
+
+except arcpy.ExecuteError:
+    # Get the geoprocessing tool error messages.
+    msg = arcpy.GetMessages(2)
+    logging.exception('arcpy')
+    email_subject_line = "<script> ERROR: Dump of {0}".format(LOG_FILE)
+    try:
+        email_log_file(LOG_FILE, email_subject_line)
+    except smtplib.SMTPException:
+        logging.exception("SMTP")
+    
+except Exception:
+    # Get any other error messages.
+    logging.exception('Python')
+    email_subject_line = "<script> ERROR: Dump of {0}".format(LOG_FILE)
+    try:
+        email_log_file(LOG_FILE, email_subject_line)
+    except smtplib.SMTPException:
+        logging.exception("SMTP")
+
+finally:
+    logging.info(("Elapsed Time: {0:.2f} Hours, {1:.2f} Minutes,"
+                  "{2:.2f} Seconds").format(*get_elapsed_time(START_TIME)))
+    logging.shutdown()
